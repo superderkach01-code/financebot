@@ -2,12 +2,12 @@ import os
 import json
 import logging
 from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("BOT_TOKEN", "8331925159:AAFW6XK7LE7GcJP6ABbiE7KaWXh2zvfdrtI")
+TOKEN = os.environ.get("BOT_TOKEN", "")
 
 CATEGORIES = {
     "🛒 Продукты": "продукты",
@@ -19,25 +19,19 @@ CATEGORIES = {
     "📦 Другие траты": "другие"
 }
 
-DATA_FILE = "expenses.json"
-
-CHOOSING_CATEGORY, ENTERING_AMOUNT, ENTERING_NOTE = range(3)
+DATA_FILE = "/tmp/expenses.json"
+CHOOSING, AMOUNT, NOTE = range(3)
 
 def load_data():
-    if os.path.exists(DATA_FILE):
+    try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {}
+    except:
+        return {}
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-
-def get_user_data(user_id, data):
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = {"expenses": []}
-    return data[uid]
 
 def main_keyboard():
     buttons = list(CATEGORIES.keys())
@@ -48,147 +42,119 @@ def main_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Я бот для учёта расходов.\n\n"
-        "Выбери категорию и введи сумму.\n"
-        "💡 Валюта — любая (€, $, грн и т.д.)\n\n"
-        "Выбери категорию:",
+        "👋 Привет! Я бот для учёта расходов.\nВыбери категорию:",
         reply_markup=main_keyboard()
     )
-    return CHOOSING_CATEGORY
+    return CHOOSING
 
-async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    uid = str(update.effective_user.id)
 
     if text == "📊 Статистика":
-        await show_stats(update, context, period="all")
-        return CHOOSING_CATEGORY
-
+        await stats(update, context, "all")
+        return CHOOSING
     if text == "📅 За месяц":
-        await show_stats(update, context, period="month")
-        return CHOOSING_CATEGORY
-
+        await stats(update, context, "month")
+        return CHOOSING
     if text == "🗑 Сбросить всё":
         data = load_data()
-        uid = str(update.effective_user.id)
-        if uid in data:
-            data[uid] = {"expenses": []}
-            save_data(data)
-        await update.message.reply_text("✅ Все данные сброшены.", reply_markup=main_keyboard())
-        return CHOOSING_CATEGORY
-
+        data[uid] = {"expenses": []}
+        save_data(data)
+        await update.message.reply_text("✅ Данные сброшены.", reply_markup=main_keyboard())
+        return CHOOSING
     if text in CATEGORIES:
-        context.user_data["category"] = CATEGORIES[text]
-        context.user_data["category_emoji"] = text
-        await update.message.reply_text(
-            f"Выбрана категория: {text}\n\n💰 Введи сумму (например: 25.50 или 100):"
-        )
-        return ENTERING_AMOUNT
+        context.user_data["cat"] = CATEGORIES[text]
+        context.user_data["cat_emoji"] = text
+        await update.message.reply_text(f"Категория: {text}\n\n💰 Введи сумму:")
+        return AMOUNT
 
-    await update.message.reply_text("Выбери категорию из меню:", reply_markup=main_keyboard())
-    return CHOOSING_CATEGORY
+    await update.message.reply_text("Выбери категорию:", reply_markup=main_keyboard())
+    return CHOOSING
 
-async def enter_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().replace(",", ".")
+async def amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        amount = float(text)
-        if amount <= 0:
+        val = float(update.message.text.replace(",", "."))
+        if val <= 0:
             raise ValueError
-    except ValueError:
-        await update.message.reply_text("❗ Введи корректную сумму (например: 25.50):")
-        return ENTERING_AMOUNT
+        context.user_data["amount"] = val
+        await update.message.reply_text("📝 Заметка? (или /skip)")
+        return NOTE
+    except:
+        await update.message.reply_text("❗ Введи число, например: 25.50")
+        return AMOUNT
 
-    context.user_data["amount"] = amount
-    await update.message.reply_text(
-        "📝 Добавь заметку (необязательно).\nИли отправь /skip чтобы пропустить:"
-    )
-    return ENTERING_NOTE
-
-async def enter_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    note = update.message.text.strip() if update.message.text != "/skip" else ""
-    await save_expense(update, context, note)
-    return CHOOSING_CATEGORY
+async def note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await save_expense(update, context, update.message.text)
+    return CHOOSING
 
 async def skip_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_expense(update, context, "")
-    return CHOOSING_CATEGORY
+    return CHOOSING
 
-async def save_expense(update, context, note):
+async def save_expense(update, context, note_text):
     data = load_data()
-    user_data = get_user_data(update.effective_user.id, data)
-
-    expense = {
-        "category": context.user_data["category"],
+    uid = str(update.effective_user.id)
+    if uid not in data:
+        data[uid] = {"expenses": []}
+    data[uid]["expenses"].append({
+        "category": context.user_data["cat"],
         "amount": context.user_data["amount"],
-        "note": note,
+        "note": note_text,
         "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-    }
-
-    user_data["expenses"].append(expense)
+    })
     save_data(data)
-
-    emoji = context.user_data["category_emoji"]
-    note_text = f"\n📝 {note}" if note else ""
+    emoji = context.user_data["cat_emoji"]
+    note_line = f"\n📝 {note_text}" if note_text else ""
     await update.message.reply_text(
-        f"✅ Сохранено!\n\n{emoji} {context.user_data['amount']:.2f}{note_text}\n📅 {expense['date']}",
+        f"✅ Сохранено!\n{emoji} {context.user_data['amount']:.2f}{note_line}",
         reply_markup=main_keyboard()
     )
 
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, period="all"):
+async def stats(update, context, period):
     data = load_data()
-    user_data = get_user_data(update.effective_user.id, data)
-    expenses = user_data["expenses"]
+    uid = str(update.effective_user.id)
+    expenses = data.get(uid, {}).get("expenses", [])
 
     if period == "month":
-        current_month = datetime.now().strftime("%Y-%m")
-        expenses = [e for e in expenses if e["date"].startswith(current_month)]
-        title = f"📅 Расходы за {datetime.now().strftime('%B %Y')}"
+        m = datetime.now().strftime("%Y-%m")
+        expenses = [e for e in expenses if e["date"].startswith(m)]
+        title = f"📅 За {datetime.now().strftime('%B %Y')}"
     else:
         title = "📊 Все расходы"
 
     if not expenses:
-        await update.message.reply_text("📭 Расходов пока нет.", reply_markup=main_keyboard())
+        await update.message.reply_text("📭 Расходов нет.", reply_markup=main_keyboard())
         return
 
     totals = {}
     for e in expenses:
-        cat = e["category"]
-        totals[cat] = totals.get(cat, 0) + e["amount"]
+        totals[e["category"]] = totals.get(e["category"], 0) + e["amount"]
 
-    total_all = sum(totals.values())
-
+    total = sum(totals.values())
     emoji_map = {v: k for k, v in CATEGORIES.items()}
-
-    lines = [f"{title}\n{'─'*25}"]
-    for cat, amount in sorted(totals.items(), key=lambda x: -x[1]):
-        emoji = emoji_map.get(cat, "📦")
-        percent = (amount / total_all * 100) if total_all > 0 else 0
-        lines.append(f"{emoji} — {amount:.2f} ({percent:.0f}%)")
-
-    lines.append(f"{'─'*25}")
-    lines.append(f"💰 Итого: {total_all:.2f}")
-    lines.append(f"🔢 Записей: {len(expenses)}")
-
+    lines = [f"{title}\n{'─'*20}"]
+    for cat, amt in sorted(totals.items(), key=lambda x: -x[1]):
+        pct = amt / total * 100
+        lines.append(f"{emoji_map.get(cat, '📦')} {amt:.2f} ({pct:.0f}%)")
+    lines.append(f"{'─'*20}\n💰 Итого: {total:.2f}\n🔢 Записей: {len(expenses)}")
     await update.message.reply_text("\n".join(lines), reply_markup=main_keyboard())
 
 def main():
-    app = Application.builder().token(TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start), MessageHandler(filters.TEXT & ~filters.COMMAND, choose_category)],
+    app = ApplicationBuilder().token(TOKEN).build()
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
         states={
-            CHOOSING_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_category)],
-            ENTERING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_amount)],
-            ENTERING_NOTE: [
-                CommandHandler("skip", skip_note),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_note)
-            ],
+            CHOOSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose)],
+            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount)],
+            NOTE: [CommandHandler("skip", skip_note), MessageHandler(filters.TEXT & ~filters.COMMAND, note)],
         },
         fallbacks=[CommandHandler("start", start)],
     )
-
-    app.add_handler(conv_handler)
+    app.add_handler(conv)
     print("Бот запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
